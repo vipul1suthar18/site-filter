@@ -596,7 +596,7 @@
         <button class="section-collapse-btn" id="collapse-btn-shortcuts" title="Collapse">▾</button>
       </div>
       <div class="sidebar-section-body" id="section-body-shortcuts" style="padding-top:10px;">
-        <div style="font-size:10px;color:var(--text-muted);margin-bottom:8px;line-height:1.5;">Assign a number key (1–9) to each status. Select rows then press the key to apply.</div>
+        <div style="font-size:10px;color:var(--text-muted);margin-bottom:8px;line-height:1.5;">Assign keys to actions. For hide: hover a column header and press your key. For status: select rows then press the key.</div>
         <div id="shortcut-editor-list"></div>
       </div>
     </div>
@@ -633,6 +633,7 @@
         <span class="shortcut-item"><span class="kbd">Ctrl D</span> fill down</span>
         <span class="shortcut-item"><span class="kbd">Del</span> delete rows</span>
         <span class="shortcut-item"><span class="kbd">↑ ↓</span> navigate</span>
+        
         <span class="shortcut-item" style="color:var(--border2);">⠿ drag headers</span>
       </div>
     </div>
@@ -659,6 +660,7 @@ let sortField = null, sortDir = 1;
 const DEFAULT_COLS = ['traffic','price','status','notes','tags','date'];
 const PROTECTED_COLS = ['site','status','date']; // cannot be removed
 let hiddenColumns = new Set(); // columns hidden from view (data preserved)
+let _hoveredCol = null;        // last hovered column header (for Ctrl+) shortcut)
 // STATUS_OPTIONS is kept in sync with statusConfig; don't edit directly
 let STATUS_OPTIONS = ['New','Contacted','Negotiating','Approved','Rejected','Used'];
 
@@ -1160,8 +1162,12 @@ function closeColCtxMenu() {
   if (_colCtxMenu) { _colCtxMenu.remove(); _colCtxMenu = null; }
   document.removeEventListener('click', _colCtxMenuClose);
   document.removeEventListener('contextmenu', _colCtxMenuClose);
+  document.removeEventListener('touchstart', _colCtxMenuClose);
 }
-function _colCtxMenuClose() { closeColCtxMenu(); }
+function _colCtxMenuClose(e) {
+  if (_colCtxMenu && !_colCtxMenu.contains(e.target)) closeColCtxMenu();
+  // intentionally do NOT call e.preventDefault() — let the tap/click reach its target
+}
 function showColCtxMenu(e, col) {
   e.preventDefault();
   closeColCtxMenu();
@@ -1173,28 +1179,28 @@ function showColCtxMenu(e, col) {
 
   // Sort options
   menu.innerHTML = `
-    <div class="col-ctx-item" onclick="sortBy('${col}');closeColCtxMenu()">
-      <span>${sortField===col&&sortDir===1?'↑':'↑'} Sort A→Z</span>
-    </div>
-    <div class="col-ctx-item" onclick="sortByDesc('${col}');closeColCtxMenu()">
-      <span>↓ Sort Z→A</span>
-    </div>
+    <div class="col-ctx-item" onclick="sortBy('${col}');closeColCtxMenu()">↑ Sort A→Z</div>
+    <div class="col-ctx-item" onclick="sortByDesc('${col}');closeColCtxMenu()">↓ Sort Z→A</div>
     <div class="col-ctx-sep"></div>
     ${isHidden
-      ? `<div class="col-ctx-item" onclick="unhideColumn('${col}');closeColCtxMenu()">👁 Unhide "${label}"</div>`
-      : `<div class="col-ctx-item" onclick="hideColumn('${col}');closeColCtxMenu()">🙈 Hide column</div>`
+      ? `<div class="col-ctx-item" onclick="unhideColumn('${col}');closeColCtxMenu()">Show "${label}"</div>`
+      : `<div class="col-ctx-item" onclick="hideColumn('${col}');closeColCtxMenu()" style="display:flex;justify-content:space-between;align-items:center;">
+           <span>Hide column</span>${hideColShortcut ? `<span style="opacity:0.45;font-size:10px;margin-left:16px;">${hideColShortcut}</span>` : ''}
+         </div>`
     }
-    ${hiddenColumns.size > 0 ? `<div class="col-ctx-item" onclick="unhideAllColumns();closeColCtxMenu()">👁 Unhide all (${hiddenColumns.size})</div>` : ''}
-    ${!isProtected ? `<div class="col-ctx-sep"></div><div class="col-ctx-item danger" onclick="closeColCtxMenu();removeColumn('${col}')">✕ Remove column</div>` : ''}
+    ${hiddenColumns.size > 0 ? `<div class="col-ctx-item" onclick="unhideAllColumns();closeColCtxMenu()">Show all hidden (${hiddenColumns.size})</div>` : ''}
+    ${!isProtected ? `<div class="col-ctx-sep"></div><div class="col-ctx-item danger" onclick="closeColCtxMenu();removeColumn('${col}')">Remove column</div>` : ''}
   `;
   menu.style.left = Math.min(e.clientX, window.innerWidth - 200) + 'px';
   menu.style.top  = Math.min(e.clientY, window.innerHeight - 220) + 'px';
   document.body.appendChild(menu);
   _colCtxMenu = menu;
   menu.addEventListener('click', e => e.stopPropagation());
+  menu.addEventListener('touchstart', e => e.stopPropagation());
   setTimeout(() => {
     document.addEventListener('click', _colCtxMenuClose);
     document.addEventListener('contextmenu', _colCtxMenuClose);
+    document.addEventListener('touchstart', _colCtxMenuClose);
   }, 10);
 }
 function sortByDesc(field) {
@@ -1471,7 +1477,9 @@ function renderTable() {
     if(ci>0) inner.innerHTML='<span class="drag-handle">&#x2803;</span>';
     inner.appendChild(document.createTextNode(col.replace(/_/g,' ')));
     th.appendChild(inner);
-    th.addEventListener('contextmenu',e=>showColCtxMenu(e,col));
+    // right-click context menu — only wire on non-touch; on touch use long-press via touchstart
+    th.addEventListener('contextmenu', e => { e.preventDefault(); showColCtxMenu(e, col); });
+    th.addEventListener('mouseenter', () => { _hoveredCol = col; });
     hr.appendChild(th);
   });
 
@@ -1760,6 +1768,7 @@ function resetStatuses() {
 // statusShortcuts: maps key string ('2'–'9') → status label (or null = unset)
 // By default it's auto: key = index + 2
 let statusShortcuts = {}; // { '2': 'New', '3': 'Contacted', ... } — empty = auto mode
+let hideColShortcut = ''; // single key to hide the hovered column
 
 function loadShortcuts() {
   try {
@@ -1767,9 +1776,14 @@ function loadShortcuts() {
     if (d) statusShortcuts = JSON.parse(d);
     else statusShortcuts = {};
   } catch { statusShortcuts = {}; }
+  try {
+    const h = localStorage.getItem('gp_hide_col_key');
+    if (h) hideColShortcut = h;
+  } catch { hideColShortcut = ''; }
 }
 function saveShortcuts() {
   localStorage.setItem('gp_shortcuts', JSON.stringify(statusShortcuts));
+  localStorage.setItem('gp_hide_col_key', hideColShortcut);
 }
 
 // Returns the key assigned to a status label (auto or custom)
@@ -1799,6 +1813,49 @@ function renderShortcutEditor() {
   const list = document.getElementById('shortcut-editor-list');
   if (!list) return;
   list.innerHTML = '';
+
+  // ── Special row: Hide column ──
+  const hideRow = document.createElement('div');
+  hideRow.className = 'shortcut-row';
+  hideRow.style.marginBottom = '10px';
+  hideRow.style.paddingBottom = '10px';
+  hideRow.style.borderBottom = '1px solid var(--border)';
+
+  const hideInp = document.createElement('input');
+  hideInp.type = 'text';
+  hideInp.className = 'shortcut-key-input';
+  hideInp.value = hideColShortcut;
+  hideInp.maxLength = 1;
+  hideInp.placeholder = '—';
+  hideInp.title = 'Press any key to assign — then hover a column header and press it';
+
+  const hideIconDot = document.createElement('span');
+  hideIconDot.style.cssText = 'width:8px;height:8px;border-radius:50%;background:var(--text-muted);flex-shrink:0;';
+
+  const hideLbl = document.createElement('span');
+  hideLbl.className = 'shortcut-status-label';
+  hideLbl.textContent = 'Hide column';
+  hideLbl.style.color = 'var(--text-dim)';
+
+  hideInp.addEventListener('keydown', (e) => {
+    e.preventDefault();
+    const k = e.key;
+    if (k === 'Backspace' || k === 'Delete' || k === 'Escape') {
+      hideColShortcut = '';
+      saveShortcuts(); renderShortcutEditor();
+      toast('Hide column shortcut cleared');
+      return;
+    }
+    if (['Shift','Control','Alt','Meta','Tab','Enter','CapsLock','ArrowUp','ArrowDown','ArrowLeft','ArrowRight'].includes(k)) return;
+    hideColShortcut = k;
+    saveShortcuts(); renderShortcutEditor();
+    toast(`Key "${k}" → hide column`);
+  });
+
+  hideRow.appendChild(hideInp);
+  hideRow.appendChild(hideIconDot);
+  hideRow.appendChild(hideLbl);
+  list.appendChild(hideRow);
 
   // Collect all currently used keys to detect conflicts
   const usedKeys = {};
@@ -1832,7 +1889,6 @@ function renderShortcutEditor() {
     keyInp.addEventListener('keydown', (e) => {
       e.preventDefault();
       const k = e.key;
-      // Clear on Backspace/Delete
       if (k === 'Backspace' || k === 'Delete' || k === 'Escape') {
         for (const [key, val] of Object.entries(statusShortcuts)) {
           if (val === s.label) delete statusShortcuts[key];
@@ -1842,15 +1898,11 @@ function renderShortcutEditor() {
         renderBulkStatusButtons();
         return;
       }
-      // Ignore modifier-only keys
       if (['Shift','Control','Alt','Meta','Tab','Enter','CapsLock','ArrowUp','ArrowDown','ArrowLeft','ArrowRight'].includes(k)) return;
-      // If auto mode, snapshot current auto assignments first
       if (Object.keys(statusShortcuts).length === 0) {
         statusConfig.forEach((ss, ii) => { statusShortcuts[String(ii + 2)] = ss.label; });
       }
-      // Remove old assignment of this key
       if (statusShortcuts[k]) delete statusShortcuts[k];
-      // Remove old assignment of this status
       for (const [key, val] of Object.entries(statusShortcuts)) {
         if (val === s.label) delete statusShortcuts[key];
       }
@@ -1870,6 +1922,7 @@ function renderShortcutEditor() {
 
 function resetShortcuts() {
   statusShortcuts = {};
+  hideColShortcut = '';
   saveShortcuts();
   renderShortcutEditor();
   renderBulkStatusButtons();
@@ -1899,15 +1952,8 @@ function renderColList(){
       pill.appendChild(unhideBtn);
     } else {
       if(canRemove) {
-        const hideBtn = document.createElement('span');
-        hideBtn.style.cssText = 'margin-left:4px;cursor:pointer;color:var(--text-muted);font-size:11px;';
-        hideBtn.title = 'Hide column (right-click header for more)';
-        hideBtn.textContent = '–';
-        hideBtn.onclick = () => hideColumn(c);
-        pill.appendChild(hideBtn);
-
         const removeBtn = document.createElement('span');
-        removeBtn.style.cssText = 'margin-left:2px;cursor:pointer;color:var(--red);';
+        removeBtn.style.cssText = 'margin-left:5px;cursor:pointer;color:var(--red);';
         removeBtn.title = 'Remove column';
         removeBtn.textContent = '×';
         removeBtn.onclick = () => removeColumn(c);
@@ -2022,6 +2068,11 @@ document.addEventListener('keydown',e=>{
   // Delete / Backspace → delete selected rows
   if((e.key==='Delete'||e.key==='Backspace') && selectedRows.size > 0) {
     e.preventDefault(); bulkDelete(); return;
+  }
+
+  // Custom hide-column shortcut (set in Key Shortcuts sidebar)
+  if(hideColShortcut && e.key === hideColShortcut && !e.ctrlKey && !e.metaKey && !e.altKey) {
+    if(_hoveredCol && _hoveredCol !== 'site') { e.preventDefault(); hideColumn(_hoveredCol); return; }
   }
 });
 document.getElementById('new-col-name').addEventListener('keydown',e=>{ if(e.key==='Enter') addColumn(); });
