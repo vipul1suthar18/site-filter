@@ -169,6 +169,44 @@
   ::-webkit-scrollbar-track { background: transparent; }
   ::-webkit-scrollbar-thumb { background: var(--border2); border-radius: 3px; }
 
+  /* ── COLUMN CONTEXT MENU ── */
+  .col-ctx-menu {
+    position: fixed; z-index: 9000;
+    background: var(--surface); border: 1px solid var(--border2);
+    border-radius: 6px; box-shadow: 0 8px 24px rgba(0,0,0,0.4);
+    padding: 4px; min-width: 160px; font-family: var(--mono); font-size: 12px;
+  }
+  .col-ctx-item {
+    display: flex; align-items: center; gap: 8px;
+    padding: 7px 12px; border-radius: 4px; cursor: pointer;
+    color: var(--text-dim); transition: background 0.1s, color 0.1s;
+    white-space: nowrap;
+  }
+  .col-ctx-item:hover { background: var(--surface2); color: var(--text); }
+  .col-ctx-item.danger:hover { background: var(--red-dim); color: var(--red); }
+  .col-ctx-sep { height: 1px; background: var(--border); margin: 3px 0; }
+
+  /* hidden col indicator in header */
+  th.col-hidden-indicator {
+    width: 12px; min-width: 12px; max-width: 12px; padding: 0; cursor: pointer;
+    background: var(--surface2); border-right: 1px solid var(--accent);
+    position: relative;
+  }
+  th.col-hidden-indicator:hover { background: var(--accent-dim); }
+  .hidden-col-reveal {
+    writing-mode: vertical-rl; font-size: 9px; color: var(--accent);
+    opacity: 0.7; padding: 4px 0; display: flex; align-items: center; justify-content: center;
+    height: 100%; letter-spacing: 0.05em;
+  }
+
+  /* hidden col pill in sidebar */
+  .tag-pill.hidden-pill {
+    opacity: 0.55; text-decoration: line-through; cursor: default;
+  }
+  .tag-pill.hidden-pill .unhide-btn {
+    margin-left:4px; cursor:pointer; color: var(--accent); text-decoration: none;
+  }
+
   /* ── SYNC STATUS PILL ── */
   .sync-pill {
     display: inline-flex; align-items: center; gap: 6px;
@@ -620,6 +658,7 @@ let columns = ['traffic','price','status','notes','tags'];
 let sortField = null, sortDir = 1;
 const DEFAULT_COLS = ['traffic','price','status','notes','tags','date'];
 const PROTECTED_COLS = ['site','status','date']; // cannot be removed
+let hiddenColumns = new Set(); // columns hidden from view (data preserved)
 // STATUS_OPTIONS is kept in sync with statusConfig; don't edit directly
 let STATUS_OPTIONS = ['New','Contacted','Negotiating','Approved','Rejected','Used'];
 
@@ -803,7 +842,7 @@ function disconnectSheet() {
   db = []; columns = [...DEFAULT_COLS];
   statusConfig = DEFAULT_STATUS_CONFIG.map(s => ({...s}));
   syncStatusOptions();
-  selectedRows.clear(); colFilters = {};
+  selectedRows.clear(); colFilters = {}; hiddenColumns = new Set();
   renderTable();
   setSyncState('', 'Local only');
   document.getElementById('disconnect-btn').style.display = 'none';
@@ -988,6 +1027,7 @@ function saveLocal() {
   const key = urlKey(gsUrl);
   localStorage.setItem('gp_db_'   + key, JSON.stringify(db));
   localStorage.setItem('gp_cols_' + key, JSON.stringify(columns));
+  localStorage.setItem('gp_hidden_' + key, JSON.stringify([...hiddenColumns]));
   // Always track which key is active
   localStorage.setItem('gp_active_key', key);
 }
@@ -1005,9 +1045,10 @@ function save() {
 function load() {
   // Only load data for the currently configured URL
   const key = urlKey(gsUrl);
-  db = []; columns = [...DEFAULT_COLS]; // reset to defaults first
+  db = []; columns = [...DEFAULT_COLS]; hiddenColumns = new Set(); // reset to defaults first
   try { const d = localStorage.getItem('gp_db_'   + key); if(d) db      = JSON.parse(d); } catch{}
   try { const c = localStorage.getItem('gp_cols_' + key); if(c) columns = JSON.parse(c); } catch{}
+  try { const h = localStorage.getItem('gp_hidden_' + key); if(h) hiddenColumns = new Set(JSON.parse(h)); } catch{}
 }
 
 // ─── THEME ───────────────────────────────────────────────────────────────────
@@ -1094,10 +1135,70 @@ function removeColumn(name) {
   if(PROTECTED_COLS.includes(name)){ toast(`"${name}" cannot be removed`); return; }
   if(!confirm(`Remove column "${name}"? Data will be lost.`)) return;
   columns = columns.filter(c => c !== name);
+  hiddenColumns.delete(name);
   delete colFilters[name];
   if(sortField === name){ sortField = null; sortDir = 1; }
   db.forEach(row => delete row.fields[name]);
   save(); renderTable(); toast(`Column "${name}" removed`);
+}
+function hideColumn(name) {
+  hiddenColumns.add(name);
+  saveLocal(); renderTable(); toast(`Column "${name}" hidden`);
+}
+function unhideColumn(name) {
+  hiddenColumns.delete(name);
+  saveLocal(); renderTable(); toast(`Column "${name}" visible`);
+}
+function unhideAllColumns() {
+  hiddenColumns.clear();
+  saveLocal(); renderTable(); toast('All columns visible');
+}
+
+// ── Column context menu ──
+let _colCtxMenu = null;
+function closeColCtxMenu() {
+  if (_colCtxMenu) { _colCtxMenu.remove(); _colCtxMenu = null; }
+  document.removeEventListener('click', _colCtxMenuClose);
+  document.removeEventListener('contextmenu', _colCtxMenuClose);
+}
+function _colCtxMenuClose() { closeColCtxMenu(); }
+function showColCtxMenu(e, col) {
+  e.preventDefault();
+  closeColCtxMenu();
+  const isProtected = PROTECTED_COLS.includes(col);
+  const isHidden = hiddenColumns.has(col);
+  const menu = document.createElement('div');
+  menu.className = 'col-ctx-menu';
+  const label = col.replace(/_/g,' ');
+
+  // Sort options
+  menu.innerHTML = `
+    <div class="col-ctx-item" onclick="sortBy('${col}');closeColCtxMenu()">
+      <span>${sortField===col&&sortDir===1?'↑':'↑'} Sort A→Z</span>
+    </div>
+    <div class="col-ctx-item" onclick="sortByDesc('${col}');closeColCtxMenu()">
+      <span>↓ Sort Z→A</span>
+    </div>
+    <div class="col-ctx-sep"></div>
+    ${isHidden
+      ? `<div class="col-ctx-item" onclick="unhideColumn('${col}');closeColCtxMenu()">👁 Unhide "${label}"</div>`
+      : `<div class="col-ctx-item" onclick="hideColumn('${col}');closeColCtxMenu()">🙈 Hide column</div>`
+    }
+    ${hiddenColumns.size > 0 ? `<div class="col-ctx-item" onclick="unhideAllColumns();closeColCtxMenu()">👁 Unhide all (${hiddenColumns.size})</div>` : ''}
+    ${!isProtected ? `<div class="col-ctx-sep"></div><div class="col-ctx-item danger" onclick="closeColCtxMenu();removeColumn('${col}')">✕ Remove column</div>` : ''}
+  `;
+  menu.style.left = Math.min(e.clientX, window.innerWidth - 200) + 'px';
+  menu.style.top  = Math.min(e.clientY, window.innerHeight - 220) + 'px';
+  document.body.appendChild(menu);
+  _colCtxMenu = menu;
+  menu.addEventListener('click', e => e.stopPropagation());
+  setTimeout(() => {
+    document.addEventListener('click', _colCtxMenuClose);
+    document.addEventListener('contextmenu', _colCtxMenuClose);
+  }, 10);
+}
+function sortByDesc(field) {
+  sortField = field; sortDir = -1; renderTable();
 }
 
 // ─── SORT ────────────────────────────────────────────────────────────────────
@@ -1325,6 +1426,9 @@ function renderTable() {
   const colsWithoutDate = columns.filter(c => c !== 'date');
   const allCols = ['site',...colsWithoutDate]; // allCols[0]=site, allCols[1+]=columns[i]
 
+  // Visible cols (respecting hidden)
+  const visibleColsWithoutDate = colsWithoutDate.filter(c => !hiddenColumns.has(c));
+
   // ── Header ──
   const thead = document.getElementById('table-head');
   thead.innerHTML='';
@@ -1335,16 +1439,23 @@ function renderTable() {
   nth.innerHTML=`<div class="th-inner" style="justify-content:center;">#</div>`;
   hr.appendChild(nth);
 
-  // date column header (before site, if date col exists)
-  if(dateVal){
+  // date column header (before site, if date col exists and not hidden)
+  if(dateVal && !hiddenColumns.has('date')){
     const dth2=document.createElement('th');
     dth2.style.cssText='min-width:90px;max-width:90px;';
-    dth2.innerHTML=`<div class="th-inner" style="color:var(--text-muted);font-size:10px;">DATE</div>`;
+    const dateInner = document.createElement('div');
+    dateInner.className = 'th-inner';
+    dateInner.style.cssText = 'color:var(--text-muted);font-size:10px;cursor:pointer;';
+    dateInner.textContent = 'DATE';
+    dateInner.addEventListener('contextmenu', e => showColCtxMenu(e, 'date'));
+    dateInner.addEventListener('click', e => { if(e.detail===2) showColCtxMenu(e,'date'); });
+    dth2.appendChild(dateInner);
     hr.appendChild(dth2);
   }
 
-  // data columns
+  // data columns — site always shown; hidden cols are fully skipped (no thin th)
   allCols.forEach((col,ci)=>{
+    if(ci > 0 && hiddenColumns.has(col)) return; // skip hidden
     const th=document.createElement('th');
     if(ci===0) th.className='th-site'; else th.classList.add('draggable');
     if(ci>0){
@@ -1355,7 +1466,12 @@ function renderTable() {
       th.addEventListener('drop',     e=>colDrop(e,ci));
       th.addEventListener('dragend',  colDragEnd);
     }
-    th.innerHTML=`<div class="th-inner">${ci>0?'<span class="drag-handle">⠿</span>':''}${col.replace(/_/g,' ')}</div>`;
+    const inner=document.createElement('div');
+    inner.className='th-inner';
+    if(ci>0) inner.innerHTML='<span class="drag-handle">&#x2803;</span>';
+    inner.appendChild(document.createTextNode(col.replace(/_/g,' ')));
+    th.appendChild(inner);
+    th.addEventListener('contextmenu',e=>showColCtxMenu(e,col));
     hr.appendChild(th);
   });
 
@@ -1382,8 +1498,8 @@ function renderTable() {
     ntd.addEventListener('click',e=>handleRowNumClick(idx,rows,rpos,e));
     tr.appendChild(ntd);
 
-    // date cell (before site)
-    if(dateVal){
+    // date cell (before site, if not hidden)
+    if(dateVal && !hiddenColumns.has('date')){
       const dateTd=document.createElement('td');
       dateTd.style.cssText='font-size:11px;color:var(--text-muted);white-space:nowrap;min-width:90px;max-width:90px;';
       const rawDate = row.fields['date']||'';
@@ -1398,17 +1514,16 @@ function renderTable() {
     sv.onclick=()=>startEdit(tr,'site',std,null,idx,rows,rpos);
     std.appendChild(sv); tr.appendChild(std);
 
-    // field cells (skip 'date' — already rendered before site)
+    // field cells (skip 'date' — already rendered before site; skip hidden cols entirely)
     for(const col of colsWithoutDate){
+      if(hiddenColumns.has(col)) continue; // skip hidden — no placeholder td
       const td=document.createElement('td');
       if(col==='status') td.className='status-cell';
       const val=row.fields[col]||'';
       const v=document.createElement('div'); v.className='cell-view';
       if(col==='status'){
         v.innerHTML=`<span style="color:${getStatusColor(val)};font-weight:600;">${val||'—'}</span>`;
-        // click-to-cycle: single-click cycles status, double-click opens edit
         v.onclick=(e)=>{
-          // if any rows selected, just open edit normally
           if(selectedRows.size > 0){ startEdit(tr,col,td,col,idx,rows,rpos); return; }
           cycleStatus(idx);
         };
@@ -1440,6 +1555,24 @@ function renderTable() {
   document.getElementById('dup-label').textContent=nd?`${nd} duplicate row${nd!==1?'s':''} found`:'No duplicates detected';
   // show dup section only when dupes exist
   document.getElementById('dup-section').style.display = nd > 0 ? '' : 'none';
+  // show hidden-cols indicator in toolbar
+  let hiddenPill = document.getElementById('hidden-cols-pill');
+  if(hiddenColumns.size > 0){
+    if(!hiddenPill){
+      hiddenPill = document.createElement('button');
+      hiddenPill.id = 'hidden-cols-pill';
+      hiddenPill.style.cssText = 'background:var(--accent-dim);border:1px solid rgba(200,255,87,0.3);color:var(--accent);font-family:var(--mono);font-size:10px;padding:3px 9px;border-radius:3px;cursor:pointer;letter-spacing:0.04em;transition:background 0.12s;';
+      hiddenPill.title = 'Click to unhide all columns';
+      hiddenPill.onclick = unhideAllColumns;
+      const toolbar = document.querySelector('.table-toolbar');
+      // insert after row-count span
+      const rowCount = document.getElementById('row-count');
+      rowCount.parentNode.insertBefore(hiddenPill, rowCount.nextSibling);
+    }
+    hiddenPill.textContent = `${hiddenColumns.size} col${hiddenColumns.size>1?'s':''} hidden`;
+  } else if(hiddenPill){
+    hiddenPill.remove();
+  }
   renderColList();
   renderBulkStatusButtons();
   renderStatusEditor();
@@ -1745,19 +1878,62 @@ function resetShortcuts() {
 
 // ─── COL PILLS + DYNAMIC SORT + DYNAMIC FILTERS ──────────────────────────────
 function renderColList(){
-  // Column pills — × on every col except site & status
-  document.getElementById('col-list').innerHTML = columns.map(c => {
-    const canRemove = !PROTECTED_COLS.includes(c);
-    return `<span class="tag-pill" style="font-size:10px;">${c.replace(/_/g,' ')}${canRemove
-      ? `<span onclick="removeColumn('${c}')" style="margin-left:4px;cursor:pointer;color:var(--red);" title="Remove column">×</span>`
-      : ''}</span>`;
-  }).join('');
+  // Column pills — visible cols get × remove, hidden cols get 👁 unhide, protected stay as-is
+  const col_list = document.getElementById('col-list');
+  col_list.innerHTML = '';
 
-  // Dynamic per-column filters — site first, then all columns, each with sort arrow
+  columns.forEach(c => {
+    const isHidden = hiddenColumns.has(c);
+    const canRemove = !PROTECTED_COLS.includes(c);
+    const pill = document.createElement('span');
+    pill.className = 'tag-pill' + (isHidden ? ' hidden-pill' : '');
+    pill.style.fontSize = '10px';
+    pill.textContent = c.replace(/_/g,' ');
+
+    if(isHidden) {
+      const unhideBtn = document.createElement('span');
+      unhideBtn.className = 'unhide-btn';
+      unhideBtn.title = 'Show column';
+      unhideBtn.textContent = '👁';
+      unhideBtn.onclick = () => unhideColumn(c);
+      pill.appendChild(unhideBtn);
+    } else {
+      if(canRemove) {
+        const hideBtn = document.createElement('span');
+        hideBtn.style.cssText = 'margin-left:4px;cursor:pointer;color:var(--text-muted);font-size:11px;';
+        hideBtn.title = 'Hide column (right-click header for more)';
+        hideBtn.textContent = '–';
+        hideBtn.onclick = () => hideColumn(c);
+        pill.appendChild(hideBtn);
+
+        const removeBtn = document.createElement('span');
+        removeBtn.style.cssText = 'margin-left:2px;cursor:pointer;color:var(--red);';
+        removeBtn.title = 'Remove column';
+        removeBtn.textContent = '×';
+        removeBtn.onclick = () => removeColumn(c);
+        pill.appendChild(removeBtn);
+      }
+    }
+    col_list.appendChild(pill);
+  });
+
+  // Show "Unhide all" if any hidden
+  if(hiddenColumns.size > 0) {
+    const unhideAll = document.createElement('span');
+    unhideAll.className = 'tag-pill';
+    unhideAll.style.cssText = 'font-size:10px;cursor:pointer;color:var(--accent);border-color:var(--accent);';
+    unhideAll.title = 'Show all hidden columns';
+    unhideAll.textContent = `👁 show all (${hiddenColumns.size})`;
+    unhideAll.onclick = unhideAllColumns;
+    col_list.appendChild(unhideAll);
+  }
+
+  // Dynamic per-column filters — site first, then all VISIBLE columns, each with sort arrow
   const fc = document.getElementById('col-filters');
   fc.innerHTML = '';
 
-  const allFilterCols = ['site', ...columns];
+  const visibleCols = columns.filter(c => !hiddenColumns.has(c));
+  const allFilterCols = ['site', ...visibleCols];
   allFilterCols.forEach(col => {
     const curVal = colFilters[col] || '';
     const isActiveSort = sortField === col;
