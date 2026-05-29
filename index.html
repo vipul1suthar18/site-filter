@@ -1107,20 +1107,14 @@ function getDuplicates() {
   for(const [,idx] of Object.entries(map)) if(idx.length>1) idx.forEach(i=>s.add(i));
   return s;
 }
-function scoreRow(row) { return ['traffic','price','tags'].reduce((s,f)=>s+(row.fields[f]?1:0),0); }
+function scoreRow(row) { return ['traffic','price','notes','tags'].reduce((s,f)=>s+(row.fields[f]?1:0),0); }
 function removeDuplicates() {
   const map = {};
   db.forEach((row,i)=>{ if(!map[row.site])map[row.site]=[]; map[row.site].push(i); });
   const toRemove = new Set();
   for(const[,idx] of Object.entries(map)){
     if(idx.length<=1) continue;
-    // Newest = lowest index (rows added to top). Notes excluded so rejection notes don't win.
-    let best=idx[0];
-    for(const i of idx){
-      const bs=scoreRow(db[best]), is=scoreRow(db[i]);
-      if(is>bs) best=i;
-      else if(is===bs && i<best) best=i;
-    }
+    const best = Math.max(...idx); // keep oldest/most-filled (highest index), remove newly added duplicates at top
     for(const i of idx) if(i!==best) toRemove.add(i);
   }
   const n=toRemove.size;
